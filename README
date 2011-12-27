@@ -1,3 +1,4 @@
 These codes were written to query DICOM worklist modality, using bindata & eventmachine gems.
-Works well in my occasion, but not tested elsewhere.
+Works well in my case, but not tested elsewhere.
 Released as the same license as ruby.
+For general DICOM works, use RUBY DICOM module at http://dicom.rubyforge.org
