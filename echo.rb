@@ -11,16 +11,15 @@ pc.transfer_syntax[0] = ContextItem.new({:type=>0x40, :data=>'1.2.840.10008.1.2'
 request.pcontext[0] = pc
 request.user_info = ContextItem.new({:type=>0x50})
 request.user_info.data << ContextItem.new({:type=>0x51})
-request.user_info.data << ContextItem.new({:type=>0x52, :data=>'1.2.276.0.7230010.3.0.3.6.0'})
-request.user_info.data << ContextItem.new({:type=>0x55, :data=>'OFFIS_DCMTK_360'})
+request.user_info.data << ContextItem.new({:type=>0x52, :data=>'1.2.826.0.1.3680043.9.445.1'})
+request.user_info.data << ContextItem.new({:type=>0x55, :data=>'RB_DICOM'})
 request.user_info.update_length
-bin = request.to_binary_s
+association = request.to_binary_s
 p request.snapshot
-hex_print(bin)
+hex_print(association)
 
 com = PCommand.new({:context_id=>1})
 com.commands << CommandElement.new_element('00000000')
-# com.commands << CommandElement.new({:telement=>0})
 com.commands << CommandElement.new({:telement=>2, :data=>'1.2.840.10008.1.1 '})
 com.commands << CommandElement.new({:telement=>0x100, :data=>0x30})
 com.commands << CommandElement.new({:telement=>0x110, :data=>1})
@@ -38,25 +37,26 @@ class Communication < EM::Connection
     @check_proc = check_proc
     @status = :initialized
     @buffer = ''
-    puts "initialized... #{check_proc.class}"
   end
     
   def post_init
+    puts 'post_init : sending association'
     send_data(@association)
     @status = :connected
   end
 
   def receive_data(data)
+    puts "received data... #{@status}"
     @buffer << data
     case @status
     when :connected
-      # check association
-      if true then
-        puts 'associated...'
+      association_rsp = Association.read(@buffer)
+      if association_rsp.pcontext[0].syntax_or_result == 0 then
+        puts 'associated..., now sending command/data'
         @status = :associated
         @buffer.clear
         send_data(@command)
-        send_data(@data)
+        send_data(@data) unless @data.nil?
       end
     when :associated
       if @check_proc.call(@buffer) then
@@ -66,12 +66,12 @@ class Communication < EM::Connection
         send_data(RELEASE_REQUEST)
       end
     when :releasing
-      #check release
-      if true then
-        puts 'releasing...'
+      if @buffer = RELEASE_RESPONSE then
+        puts 'successful release...'
         @status = :finished
         @buffer.clear
         close_connection
+        EM.stop
       end
     end
   end
@@ -79,8 +79,9 @@ end
 
 EM.run do
   p = Proc.new do |buffer| 
-    puts "check function... #{buffer}"
-    true 
+    puts "check function..."
+    com_rsp = PCommand.read(buffer)
+    com_rsp.commands[-1].data == 0
   end
-  a = EM.connect('0.0.0.0', 8080, Communication, "ASSOCIATION", "COMMAND", "DATA", p)
+  EM.connect(ARGV[0], ARGV[1].to_i, Communication, association, com.to_binary_s, nil, p)
 end

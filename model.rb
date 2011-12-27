@@ -41,7 +41,7 @@ module RB_DICOM
     end
 
     def self.new_element(tag, data=nil)
-      raise if tag.length != 8 or DATA_DICT[tag].nil?
+      raise "Unknown or wrong tag : #{tag}" if tag.length != 8 or DATA_DICT[tag].nil?
       group = tag[0..3].to_i(16)
       element = tag[4..-1].to_i(16)
       if data.nil?
@@ -51,7 +51,8 @@ module RB_DICOM
       end
     end
     
-    # :value=>lambda { num_bytes... } cause 'stack too deep' within choice
+    # :value=>lambda { num_bytes... } cause 'stack too deep' at choice
+    # called by PData.post_process
     def update_sequence
       return unless vr == 'SQ'
       data.data.each do |datum|
@@ -71,8 +72,10 @@ module RB_DICOM
     
     uint16  :tgroup, :initial_value=>0
     uint16  :telement
+    # TODO - affected SOP class string itself is 17 bytes, but value is 18 bytes with 0 padded
     # tag : 4bytes, length : 4bytes
     uint32  :dlength, :value=>lambda {num_bytes - 8}, :check_value=>lambda { value.even? }      
+    # uint32  :dlength, :value=>lambda {data.size}, :check_value=>lambda { value.even? }      
     choice  :data, :selection=>:tag do
       uint32    '00000000', :initial_value=>0             # command group length
       string    '00000002', :read_length=>:dlength        # affected SOP class UID
@@ -104,7 +107,8 @@ module RB_DICOM
       bit1    :last_flag, :initial_value=>1   # default last fragment
       bit1    :command_flag, :value=>1        # 1 is for command
     end
-    array     :commands, :type=>:command_element
+    # read_until : commands[0] value is rest of command size except group length itself (12)
+    array     :commands, :type=>:command_element, :read_until=>lambda {array.num_bytes == commands[0].data+12}
     
     def post_process
       commands.each do |command|
@@ -130,7 +134,7 @@ module RB_DICOM
       bit1    :last_flag, :initial_value=>1   # default last fragment
       bit1    :command_flag, :value=>0        # 0 is for data
     end
-    array     :data, :type=>:data_element
+    array     :data, :type=>:data_element, :read_until=>lambda {array.num_bytes == vlength-2}
     
     def add_to_sequence(element, sindex=0)
       index = 0
@@ -146,7 +150,7 @@ module RB_DICOM
       end
     end
     
-    # :value=>lambda { num_bytes... } cause 'stack too deep' within choice
+    # :value=>lambda { num_bytes... } cause 'stack too deep' at choice
     def post_process
       data.each do |datum|
         datum.dlength = datum.num_bytes - 8
@@ -161,12 +165,12 @@ module RB_DICOM
   end
   
   class ContextItem < BinData::Record
-    uint8     :type
+    uint8     :type, :initial_value=>0
     skip      :length=>1
-    uint16be  :dlength, :initial_value=>lambda {num_bytes-4}
+    uint16be  :dlength, :value=>lambda {num_bytes-4}
     choice    :data, :selection=>:type do
-      uint32le  0x51, :initial_value=>16384       # max PDU length
-      array     0x50, :type=>:context_item        # user info
+      uint32le  0x51, :initial_value=>16384                     # max PDU length
+      array     0x50, :type=>:context_item, :initial_length=>3  # user info, capable of only 3 items
       string    :default, :read_length=>:dlength
     end
     
@@ -180,11 +184,15 @@ module RB_DICOM
     skip      :length=>1
     uint16be  :dlength, :initial_value=>lambda {num_bytes-4}
     uint8     :pid, :initial_value=>1
-    skip      :length=>3
+    choice    :blank, :selection => :type do
+      skip      0x20, :length=>3
+      skip      0x21, :length=>1
+    end
     choice    :syntax_or_result, :selection => :type do
       context_item    0x20
       uint8           0x21
     end
+    uint8     :blank2, :onlyif=>lambda {type==0x21}
     array     :transfer_syntax, :type=>:context_item, :initial_length=>1
   end
   
@@ -200,7 +208,7 @@ module RB_DICOM
     struct    :application_context do
       uint8     :item_type, :value=>0x10
       skip      :length=>1
-      uint16le  :ac_length, :value=>lambda {ac_name.length}
+      uint16be  :ac_length, :value=>lambda {ac_name.length}
       string    :ac_name, :read_length=>:ac_length, :initial_value=>'1.2.840.10008.3.1.1.1'
     end
     array     :pcontext, :type=>:presentation_context, :initial_length=>1
@@ -208,6 +216,7 @@ module RB_DICOM
   end
   
   def hex_print(str)
+    puts "size : #{str.length}"
     0.step(str.length-1, 16) do |i|
       output = '00  '*16
       upper = str.length - i - 1
