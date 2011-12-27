@@ -1,4 +1,5 @@
 require 'bindata'
+require 'eventmachine'
 require './constants'
 
 module RB_DICOM
@@ -72,10 +73,8 @@ module RB_DICOM
     
     uint16  :tgroup, :initial_value=>0
     uint16  :telement
-    # TODO - affected SOP class string itself is 17 bytes, but value is 18 bytes with 0 padded
     # tag : 4bytes, length : 4bytes
     uint32  :dlength, :value=>lambda {num_bytes - 8}, :check_value=>lambda { value.even? }      
-    # uint32  :dlength, :value=>lambda {data.size}, :check_value=>lambda { value.even? }      
     choice  :data, :selection=>:tag do
       uint32    '00000000', :initial_value=>0             # command group length
       string    '00000002', :read_length=>:dlength        # affected SOP class UID
@@ -203,7 +202,7 @@ module RB_DICOM
     uint16be  :protocol, :initial_value=>1
     skip      :length=>2
     string    :called_title, :length=>16, :initial_value=>'ANY-SCP', :pad_char=>0x20
-    string    :calling_title, :length=>16, :initial_value=>'ECHOSCU', :pad_char=>0x20
+    string    :calling_title, :length=>16, :initial_value=>'RB-SCU', :pad_char=>0x20
     skip      :length=>32
     struct    :application_context do
       uint8     :item_type, :value=>0x10
@@ -215,6 +214,81 @@ module RB_DICOM
     context_item  :user_info
   end
   
+  class Communication < EM::Connection  
+    def initialize(association, command, data=nil, data_proc=nil, print_status = false)
+      @association = association
+      @command = command
+      @data = data
+      @data_proc = data_proc
+      @status = :initialized
+      @buffer = ''
+      @print_status = print_status
+    end
+    
+    def post_init
+      puts 'post_init : sending association' if @print_status
+      send_data(@association)
+      @status = :connected
+    end
+
+    def parse_buffer(buffer)
+      coms, data = [], []
+      size = 0
+      com_rsp = dat_rsp = nil
+      while size < buffer.size
+        data_size = buffer[size+2..size+5].unpack('N')[0]
+        if (buffer[size+11].ord & 1) == 1
+          com_rsp = PCommand.read(buffer[size..(size+data_size+6)])
+          coms << com_rsp
+          size += com_rsp.num_bytes
+        else
+          datum = {}
+          dat_rsp = PData.read(buffer[size..(size+data_size+6)])
+          dat_rsp.data.each do |de|
+            tag = "%04x%04x" % [de.tgroup, de.telement]
+            datum[tag] = de.data unless de.vr == 'SQ'
+          end
+          data << datum
+          size += dat_rsp.num_bytes
+        end
+      end
+      [coms, data]
+    end
+  
+    def receive_data(data)
+      puts "received data... #{@status}" if @print_status
+      @buffer << data
+      case @status
+      when :connected
+        association_rsp = Association.read(@buffer)
+        if association_rsp.pcontext[0].syntax_or_result == 0 then
+          puts 'associated..., now sending command/data' if @print_status
+          @status = :associated
+          @buffer.clear
+          send_data(@command)
+          send_data(@data) unless @data.nil?
+        end
+      when :associated
+        coms, data = parse_buffer(@buffer)
+        if coms.size > 0 and coms[-1].commands[-1].data == 0 then
+          @data_proc.call(data) unless @data_proc.nil?
+          puts 'received data, finished...' if @print_status
+          @status = :releasing
+          @buffer.clear
+          send_data(RELEASE_REQUEST)
+        end
+      when :releasing
+        if @buffer = RELEASE_RESPONSE then
+          puts 'successful release...' if @print_status
+          @status = :finished
+          @buffer.clear
+          close_connection
+          EM.stop
+        end
+      end
+    end
+  end
+    
   def hex_print(str)
     puts "size : #{str.length}"
     0.step(str.length-1, 16) do |i|
@@ -223,7 +297,6 @@ module RB_DICOM
       upper = 15 if upper > 15
       0.step(upper) do |j|
         output[(j*4)..(j*4+1)] = '%02x' % str[i+j].ord
-        #puts "#{i+j} : #{str[i+j]} - #{str[i+j].ord} #{'%02x' % str[i+j].to_i}"       
       end
       puts '%04x : %s' % [i, output]
     end

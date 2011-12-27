@@ -1,0 +1,3 @@
+These codes were written to query DICOM worklist modality, using bindata & eventmachine gems.
+Works well in my occasion, but not tested elsewhere.
+Released as the same license as ruby.
